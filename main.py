@@ -356,6 +356,7 @@ Extracted geometric features (from image analysis):
 - Numbers found at correct positions: {features['numbers_found']}/12
 - Numbers outside circle: {features['numbers_outside_circle']}
 - Number spacing regularity: {features['number_spacing_regularity']} (0-1)
+- Number quadrant distribution: {features.get('number_quadrant_distribution', [])}
 - Clock hands detected: {features['hand_count']}
 - Minute hand longer than hour hand: {features['hands_correct_length_ratio']}
 - Hands pointing to correct time (10:10): {features['hands_pointing_correct_time']}
@@ -363,25 +364,37 @@ Extracted geometric features (from image analysis):
 - Time taken: {features['time_taken_seconds']} seconds
 - Drawing hesitations: {features['hesitation_pauses']}
 
-CDT Scoring criteria (Shulman 4-point scale):
-4 = Perfect or near-perfect
-3 = Minor visuospatial errors
-2 = Inaccurate representation of time, visuospatial organization preserved
-1 = Moderate visuospatial disorganization
-0 = No reasonable representation of clock
+CDT Scoring criteria (CLOX Scoring — 15 points total):
+1. Circle (max 2 pts): 2=Reasonable circle, roughly closed, 1=Heavily distorted but recognizable, 0=No circle or just a line.
+2. Numbers Present (max 3 pts): 3=All 12 numbers present, 2=10–11 numbers present, 1=7–9 numbers present, 0=Fewer than 7, or numbers written outside circle.
+3. Number Placement (max 4 pts): 4=Numbers in correct quadrants, roughly evenly spaced, 3=Minor spacing errors but positions correct, 2=Numbers only on one side (hemineglect) OR numbers going counterclockwise, 1=Severe clustering, 0=Numbers random with no spatial logic.
+4. Hands Present (max 2 pts): 2=Two hands present, 1=One hand present, 0=No hands.
+5. Hand Length (max 2 pts): 2=Minute hand longer than hour hand AND pointing to 2, hour hand pointing to 10, 1=Both hands present but same length OR direction slightly off, 0=Hands present but pointing to completely wrong positions.
+6. Time Accuracy (max 2 pts): 2=Both hands in correct position (10:10), 1=One hand correct, 0=Neither correct.
+
+Total clock_score is out of 15.
+
+Interpretation mapping:
+13-15: Normal (Visuospatial intact)
+10-12: Mild concern (Possible very early decline — retest in 3 months)
+7-9: Moderate concern (Consistent with MCI — flag for further testing)
+4-6: Significant impairment (Consistent with mild-moderate dementia)
+0-3: Severe impairment (Cannot complete basic visuospatial task)
 
 Return ONLY this JSON (no markdown):
 {{
-  "clock_score": <0-4 on CDT scale>,
-  "visuospatial_score": <0-10 normalized for age/education>,
+  "clock_score": <0-15 on CLOX scale>,
+  "visuospatial_score": <0-10 normalized for age/education (roughly clock_score / 15 * 10)>,
   "domain_breakdown": {{
-    "circle": <0-10>,
-    "numbers": <0-10>,
-    "hands_present": <0-10>,
-    "hands_time": <0-10>
+    "circle": <0-2>,
+    "numbers_present": <0-3>,
+    "number_placement": <0-4>,
+    "hands_present": <0-2>,
+    "hand_length": <0-2>,
+    "time_accuracy": <0-2>
   }},
   "clinical_flags": [<list of concerns, empty if none>],
-  "interpretation": "<2 sentences, plain English for family>",
+  "interpretation": "<Based on the Interpretation mapping above>",
   "doctor_note": "<clinical note for neurologist>"
 }}
 """
@@ -399,45 +412,99 @@ Return ONLY this JSON (no markdown):
 
 def _fallback_scoring(features: dict, age: int) -> dict:
     """Rule-based fallback if Gemini fails — app never crashes."""
-    score = 0
     flags = []
 
-    if features["circle_detected"] and features["circle_completeness"] > 0.6:
-        score += 1
-    else:
-        flags.append("Circle incomplete or absent")
+    # 1. Circle (0-2)
+    circle = 0
+    if features["circle_detected"]:
+        if features["circle_completeness"] > 0.8:
+            circle = 2
+        elif features["circle_completeness"] > 0.4:
+            circle = 1
+        else:
+            circle = 0
+    if circle < 2:
+        flags.append("Circle heavily distorted, incomplete, or absent")
 
-    if features["numbers_found"] >= 8:
-        score += 1
-    else:
-        flags.append(f"Only {features['numbers_found']}/12 numbers detected")
+    # 2. Numbers Present (0-3)
+    numbers_present = 0
+    if features["numbers_found"] >= 12:
+        numbers_present = 3
+    elif features["numbers_found"] >= 10:
+        numbers_present = 2
+    elif features["numbers_found"] >= 7:
+        numbers_present = 1
+    if numbers_present < 3:
+        flags.append(f"Only {features['numbers_found']} numbers detected")
 
+    # 3. Number Placement (0-4)
+    number_placement = 0
+    if numbers_present >= 2:
+        if features["number_spacing_regularity"] > 0.8:
+            number_placement = 4
+        elif features["number_spacing_regularity"] > 0.5:
+            number_placement = 3
+        else:
+            number_placement = 1
+
+    # 4. Hands Present (0-2)
+    hands_present = 0
     if features["hand_count"] >= 2:
-        score += 1
-    else:
+        hands_present = 2
+    elif features["hand_count"] == 1:
+        hands_present = 1
+    if hands_present < 2:
         flags.append(f"Only {features['hand_count']} hand(s) detected")
 
-    if features["hands_pointing_correct_time"]:
-        score += 1
-    else:
+    # 5. Hand Length (0-2)
+    hand_length = 0
+    if hands_present == 2:
+        if features["hands_correct_length_ratio"]:
+            hand_length = 2
+        else:
+            hand_length = 1
+
+    # 6. Time Accuracy (0-2)
+    time_accuracy = 0
+    if hands_present > 0:
+        if features["hands_pointing_correct_time"]:
+            time_accuracy = 2
+        elif hands_present == 2:
+            time_accuracy = 1
+    if time_accuracy < 2:
         flags.append("Hands not pointing to correct time (10:10)")
 
-    visuospatial = (score / 4) * 10
+    score = circle + numbers_present + number_placement + hands_present + hand_length + time_accuracy
+
+    visuospatial = (score / 15.0) * 10.0
     if age >= 70:
-        visuospatial = min(10, visuospatial + 0.5)
+        visuospatial = min(10.0, visuospatial + 0.5)
+
+    if score >= 13:
+        interpretation = "Normal. Visuospatial intact."
+    elif score >= 10:
+        interpretation = "Mild concern. Possible very early decline — retest in 3 months."
+    elif score >= 7:
+        interpretation = "Moderate concern. Consistent with MCI — flag for further testing."
+    elif score >= 4:
+        interpretation = "Significant impairment. Consistent with mild-moderate dementia."
+    else:
+        interpretation = "Severe impairment. Cannot complete basic visuospatial task."
 
     return {
         "clock_score": score,
         "visuospatial_score": round(visuospatial, 1),
         "domain_breakdown": {
-            "circle": 10 if score >= 1 else 3,
-            "numbers": min(10, features["numbers_found"] / 1.2),
-            "hands_present": 10 if features["hand_count"] == 2 else 4,
-            "hands_time": 10 if features["hands_pointing_correct_time"] else 2
+            "circle": circle,
+            "numbers_present": numbers_present,
+            "number_placement": number_placement,
+            "hands_present": hands_present,
+            "hand_length": hand_length,
+            "time_accuracy": time_accuracy
         },
         "clinical_flags": flags,
-        "interpretation": f"Clock drawing score: {score}/4. {'Some concerns noted.' if flags else 'Within normal range.'}",
-        "doctor_note": f"CDT score {score}/4. Circle: {features['circle_detected']}, Numbers: {features['numbers_found']}/12, Hands: {features['hand_count']}."
+        "interpretation": interpretation,
+        "doctor_note": f"CLOX score {score}/15. Circle: {circle}/2, Numbers: {numbers_present}/3, Placement: {number_placement}/4, Hands: {hands_present}/2, Length: {hand_length}/2, Time: {time_accuracy}/2."
     }
 
 
