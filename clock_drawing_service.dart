@@ -202,7 +202,7 @@ class ClockDrawingService {
 class ClockDrawingResult {
   final String patientId;
   final double visuospatialScore;  // 0-10 → send to aggregator
-  final double clockScore;          // 0-4 CDT scale
+  final double clockScore;          // 0-15 CLOX scale
   final Map<String, dynamic> features;
   final Map<String, dynamic> domainBreakdown;
   final List<String> clinicalFlags;
