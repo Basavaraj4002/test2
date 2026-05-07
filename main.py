@@ -82,16 +82,27 @@ def extract_clock_features(image_base64: str, stroke_count: int,
     # Decode image
     img_bytes = base64.b64decode(image_base64)
     img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
 
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image data")
+
+    # Handle transparent PNGs from Flutter canvas
+    if len(img.shape) == 3 and img.shape[2] == 4:
+        alpha_channel = img[:, :, 3] / 255.0
+        white_background = np.ones_like(img[:, :, :3], dtype=np.uint8) * 255
+        img_bgr = img[:, :, :3]
+        for c in range(3):
+            white_background[:, :, c] = (alpha_channel * img_bgr[:, :, c] + (1 - alpha_channel) * white_background[:, :, c])
+        img = white_background
+    elif len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
     h, w = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     # ── Preprocessing ──────────────────────────────────────────
-    # Invert if white-on-black (Flutter canvas default is black on white)
+    # Invert if white-on-black
     mean_brightness = np.mean(gray)
     if mean_brightness < 128:
         gray = cv2.bitwise_not(gray)
